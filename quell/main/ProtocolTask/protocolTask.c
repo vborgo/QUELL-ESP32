@@ -8,10 +8,11 @@
 #include "protocolTask.h"
 #include "protocol.h"
 #include "fifo.h"
+#include "quell.h"
 
 
-#define EX_UART_NUM UART_NUM_1
-#define UART_BUF_SIZE (1024UL)
+#define PROTOCOL_UART_NUM UART_NUM_1
+#define UART_BUF_SIZE (512UL)
 
 #define FIFO_BUF_SIZE (128UL)
 #define RX_READ_BUFFER_SIZE (32UL)
@@ -21,9 +22,14 @@ static const char *TAG = "protocol";
 static QueueHandle_t uart_queue_rx;
 static QueueHandle_t uart_queue_tx;
 
-void uartReceiveBytes(uint32_t _u32UartNumber, QueueHandle_t _xQueueRx, fifo_t *_psFIFORx, const char* _pcTAG)
+int32_t uartReceiveBytes(uint32_t _u32UartNumber, QueueHandle_t _xQueueRx, fifo_t *_psFIFORx, const char* _pcTAG)
 {
     uart_event_t event;
+
+    if(_xQueueRx == NULL || _psFIFORx == NULL || _pcTAG == NULL)
+    {
+        return QUELL_ERROR;
+    }
 
     //Waiting for UART event.
     if(xQueueReceive(_xQueueRx, (void * )&event, (portTickType) 1/portTICK_PERIOD_MS)) 
@@ -85,25 +91,68 @@ void uartReceiveBytes(uint32_t _u32UartNumber, QueueHandle_t _xQueueRx, fifo_t *
                 break;
         }
     }
+
+    return QUELL_OK;
 }
+
+int32_t uartSendBytes(uint32_t _u32UartNumber, fifo_t *_psFIFOTx, const char* _pcTAG)
+{
+    char acSendBuffer[32];
+    size_t u16FIFOCount;
+    uint16_t u16Index;
+
+    /* Check if there is data queued to be sent */
+    if(FIFO_count(_psFIFOTx, &u16FIFOCount) == false || u16FIFOCount == 0)
+    {
+        return QUELL_ERROR;
+    }
+
+    /* Get the bytes and transfer to the local buffer to send to uart functions all at once */
+    for(u16Index = 0; u16Index < u16FIFOCount || u16Index < sizeof(acSendBuffer); u16Index++)
+    {
+        if(FIFO_get(_psFIFOTx, (char*)&acSendBuffer[u16Index]) == false)
+        {
+            break;
+        }
+    }
+
+    /* Send data to uart */
+    if(uart_write_bytes(_u32UartNumber, (const char*) acSendBuffer, u16Index) != u16Index)
+    {
+        return QUELL_ERROR;
+    }
+
+    return QUELL_OK;
+}
+
 
 static void protocol_task(void *pvParameters)
 {
     fifo_t sFIFORx;
-    char* pu8FIFOBuffer = (char*) malloc(FIFO_BUF_SIZE);
-    if(FIFO_init(&sFIFORx, pu8FIFOBuffer, FIFO_BUF_SIZE) == false)
+    fifo_t sFIFOTx;
+    char* pu8FIFORxBuffer = (char*) malloc(FIFO_BUF_SIZE);
+    char* pu8FIFOTxBuffer = (char*) malloc(FIFO_BUF_SIZE);
+    if(FIFO_init(&sFIFORx, pu8FIFORxBuffer, FIFO_BUF_SIZE) == false || FIFO_init(&sFIFOTx, pu8FIFOTxBuffer, FIFO_BUF_SIZE) == false)
     {
-        ESP_LOGI(TAG, "Error initializing FIFO Rx");
+        ESP_LOGI(TAG, "Error initializing FIFO Rx or Tx");
         while(1);
     }
 
     for(;;) 
     {
-        /* Transfer received bytes to FIFO Rx*/
-        uartReceiveBytes(EX_UART_NUM, uart_queue_rx, &sFIFORx, TAG);
+        /* Transfer received bytes from uart to FIFO Rx */
+        uartReceiveBytes(PROTOCOL_UART_NUM, uart_queue_rx, &sFIFORx, TAG);
+        /* Transfer received bytes from FIFO Rx to uart*/
+        uartSendBytes(PROTOCOL_UART_NUM, &sFIFOTx, TAG);
+
+        /* Process incoming data */
+        processIncomingCommunication(&sFIFORx, &sFIFOTx, TAG);
+
     }
-    free(pu8FIFOBuffer);
-    pu8FIFOBuffer = NULL;
+    free(pu8FIFORxBuffer);
+    pu8FIFORxBuffer = NULL;
+    free(pu8FIFOTxBuffer);
+    pu8FIFOTxBuffer = NULL;
     vTaskDelete(NULL);
 }
 
@@ -123,18 +172,13 @@ void protocolTaskInit(void)
     };
 
     //Install UART driver, and get the queue.
-    uart_driver_install(EX_UART_NUM, UART_BUF_SIZE * 2, UART_BUF_SIZE * 2, 20, &uart_queue_rx, 0);
-    uart_param_config(EX_UART_NUM, &uart_config);
+    uart_driver_install(PROTOCOL_UART_NUM, UART_BUF_SIZE * 2, UART_BUF_SIZE * 2, 20, &uart_queue_rx, 0);
+    uart_param_config(PROTOCOL_UART_NUM, &uart_config);
 
     //Set UART log level
     esp_log_level_set(TAG, ESP_LOG_INFO);
     //Set UART pins (using UART0 default pins ie no changes.)
-    uart_set_pin(EX_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    //Set uart pattern detect function.
-    //uart_enable_pattern_det_baud_intr(EX_UART_NUM, '+', PATTERN_CHR_NUM, 9, 0, 0);
-    //Reset the pattern queue length to record at most 20 pattern positions.
-    //uart_pattern_queue_reset(EX_UART_NUM, 20);
+    uart_set_pin(PROTOCOL_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     //Create Protocol task
     xTaskCreate(protocol_task, "protocol_task", 1024, NULL, 12, NULL);

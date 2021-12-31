@@ -4,7 +4,11 @@
     "*.inc": "c",
     "random": "c",
     "task.h": "c",
-    "protocoltask.h": "c"
+    "protocoltask.h": "c",
+    "array": "c",
+    "string_view": "c",
+    "initializer_list": "c",
+    "utility": "c"
   },
   "idf.adapterTargetName": "esp32"
 }
