@@ -6,97 +6,153 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "protocolTask.h"
+#include "protocol.h"
+#include "fifo.h"
+#include "quell.h"
+
+
+#define PROTOCOL_UART_NUM UART_NUM_1
+#define UART_BUF_SIZE (512UL)
+
+#define FIFO_BUF_SIZE (128UL)
+#define RX_READ_BUFFER_SIZE (32UL)
+
 
 static const char *TAG = "protocol";
+static QueueHandle_t uart_queue_rx;
+static QueueHandle_t uart_queue_tx;
 
+int32_t uartReceiveBytes(uint32_t _u32UartNumber, QueueHandle_t _xQueueRx, fifo_t *_psFIFORx, const char* _pcTAG)
+{
+    uart_event_t event;
 
-#define EX_UART_NUM UART_NUM_1
-// #define PATTERN_CHR_NUM    (3)         /*!< Set the number of consecutive and identical characters received by receiver which defines a UART pattern*/
+    if(_xQueueRx == NULL || _psFIFORx == NULL || _pcTAG == NULL)
+    {
+        return QUELL_ERROR;
+    }
 
-#define BUF_SIZE (1024)
-#define RD_BUF_SIZE (BUF_SIZE)
-static QueueHandle_t uart_queue;
+    //Waiting for UART event.
+    if(xQueueReceive(_xQueueRx, (void * )&event, (portTickType) 1/portTICK_PERIOD_MS)) 
+    {
+        //ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
+        switch(event.type) 
+        {
+            //Event of UART receving data
+            /*We'd better handler data event fast, there would be much more data events than
+            other types of events. If we take too much time on data event, the queue might
+            be full.*/
+            case UART_DATA:
+                //ESP_LOGI(TAG, "[UART DATA]: %d", event.size);
+                while(event.size--)
+                {
+                    char cData;
+                    if(uart_read_bytes(_u32UartNumber, &cData, 1, portMAX_DELAY) == 1)
+                    {
+                        if(FIFO_put(_psFIFORx, cData) == false)
+                        {
+                            ESP_LOGI(_pcTAG, "Failed to put byte in FIFO Rx");
+                        }
+                    }
+                }
+                //uart_write_bytes(EX_UART_NUM, (const char*) dtmp, event.size);
+                break;
+            //Event of HW FIFO overflow detected
+            case UART_FIFO_OVF:
+                ESP_LOGI(_pcTAG, "hw fifo overflow");
+                // If fifo overflow happened, you should consider adding flow control for your application.
+                // The ISR has already reset the rx FIFO,
+                // As an example, we directly flush the rx buffer here in order to read more data.
+                uart_flush_input(_u32UartNumber);
+                xQueueReset(_xQueueRx);
+                break;
+            //Event of UART ring buffer full
+            case UART_BUFFER_FULL:
+                ESP_LOGI(_pcTAG, "ring buffer full");
+                // If buffer full happened, you should consider encreasing your buffer size
+                // As an example, we directly flush the rx buffer here in order to read more data.
+                uart_flush_input(_u32UartNumber);
+                xQueueReset(_xQueueRx);
+                break;
+            //Event of UART RX break detected
+            case UART_BREAK:
+                ESP_LOGI(_pcTAG, "uart rx break");
+                break;
+            //Event of UART parity check error
+            case UART_PARITY_ERR:
+                ESP_LOGI(_pcTAG, "uart parity error");
+                break;
+            //Event of UART frame error
+            case UART_FRAME_ERR:
+                ESP_LOGI(_pcTAG, "uart frame error");
+                break;
+            //Others
+            default:
+                ESP_LOGI(TAG, "uart event type: %d", event.type);
+                break;
+        }
+    }
+
+    return QUELL_OK;
+}
+
+int32_t uartSendBytes(uint32_t _u32UartNumber, fifo_t *_psFIFOTx, const char* _pcTAG)
+{
+    char acSendBuffer[32];
+    size_t u16FIFOCount;
+    uint16_t u16Index;
+
+    /* Check if there is data queued to be sent */
+    if(FIFO_count(_psFIFOTx, &u16FIFOCount) == false || u16FIFOCount == 0)
+    {
+        return QUELL_ERROR;
+    }
+
+    /* Get the bytes and transfer to the local buffer to send to uart functions all at once */
+    for(u16Index = 0; u16Index < u16FIFOCount || u16Index < sizeof(acSendBuffer); u16Index++)
+    {
+        if(FIFO_get(_psFIFOTx, (char*)&acSendBuffer[u16Index]) == false)
+        {
+            break;
+        }
+    }
+
+    /* Send data to uart */
+    if(uart_write_bytes(_u32UartNumber, (const char*) acSendBuffer, u16Index) != u16Index)
+    {
+        return QUELL_ERROR;
+    }
+
+    return QUELL_OK;
+}
+
 
 static void protocol_task(void *pvParameters)
 {
-    uart_event_t event;
-    size_t buffered_size;
-    uint8_t* dtmp = (uint8_t*) malloc(RD_BUF_SIZE);
+    fifo_t sFIFORx;
+    fifo_t sFIFOTx;
+    char* pu8FIFORxBuffer = (char*) malloc(FIFO_BUF_SIZE);
+    char* pu8FIFOTxBuffer = (char*) malloc(FIFO_BUF_SIZE);
+    if(FIFO_init(&sFIFORx, pu8FIFORxBuffer, FIFO_BUF_SIZE) == false || FIFO_init(&sFIFOTx, pu8FIFOTxBuffer, FIFO_BUF_SIZE) == false)
+    {
+        ESP_LOGI(TAG, "Error initializing FIFO Rx or Tx");
+        while(1);
+    }
+
     for(;;) 
     {
-        //Waiting for UART event.
-        if(xQueueReceive(uart_queue, (void * )&event, (portTickType)portMAX_DELAY)) 
-        {
-            bzero(dtmp, RD_BUF_SIZE);
-            ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
-            switch(event.type) {
-                //Event of UART receving data
-                /*We'd better handler data event fast, there would be much more data events than
-                other types of events. If we take too much time on data event, the queue might
-                be full.*/
-                case UART_DATA:
-                    ESP_LOGI(TAG, "[UART DATA]: %d", event.size);
-                    uart_read_bytes(EX_UART_NUM, dtmp, event.size, portMAX_DELAY);
-                    ESP_LOGI(TAG, "[DATA EVT]:");
-                    uart_write_bytes(EX_UART_NUM, (const char*) dtmp, event.size);
-                    break;
-                //Event of HW FIFO overflow detected
-                case UART_FIFO_OVF:
-                    ESP_LOGI(TAG, "hw fifo overflow");
-                    // If fifo overflow happened, you should consider adding flow control for your application.
-                    // The ISR has already reset the rx FIFO,
-                    // As an example, we directly flush the rx buffer here in order to read more data.
-                    uart_flush_input(EX_UART_NUM);
-                    xQueueReset(uart_queue);
-                    break;
-                //Event of UART ring buffer full
-                case UART_BUFFER_FULL:
-                    ESP_LOGI(TAG, "ring buffer full");
-                    // If buffer full happened, you should consider encreasing your buffer size
-                    // As an example, we directly flush the rx buffer here in order to read more data.
-                    uart_flush_input(EX_UART_NUM);
-                    xQueueReset(uart_queue);
-                    break;
-                //Event of UART RX break detected
-                case UART_BREAK:
-                    ESP_LOGI(TAG, "uart rx break");
-                    break;
-                //Event of UART parity check error
-                case UART_PARITY_ERR:
-                    ESP_LOGI(TAG, "uart parity error");
-                    break;
-                //Event of UART frame error
-                case UART_FRAME_ERR:
-                    ESP_LOGI(TAG, "uart frame error");
-                    break;
-                //UART_PATTERN_DET
-                // case UART_PATTERN_DET:
-                //     uart_get_buffered_data_len(EX_UART_NUM, &buffered_size);
-                //     int pos = uart_pattern_pop_pos(EX_UART_NUM);
-                //     ESP_LOGI(TAG, "[UART PATTERN DETECTED] pos: %d, buffered size: %d", pos, buffered_size);
-                //     if (pos == -1) {
-                //         // There used to be a UART_PATTERN_DET event, but the pattern position queue is full so that it can not
-                //         // record the position. We should set a larger queue size.
-                //         // As an example, we directly flush the rx buffer here.
-                //         uart_flush_input(EX_UART_NUM);
-                //     } else {
-                //         uart_read_bytes(EX_UART_NUM, dtmp, pos, 100 / portTICK_PERIOD_MS);
-                //         uint8_t pat[PATTERN_CHR_NUM + 1];
-                //         memset(pat, 0, sizeof(pat));
-                //         uart_read_bytes(EX_UART_NUM, pat, PATTERN_CHR_NUM, 100 / portTICK_PERIOD_MS);
-                //         ESP_LOGI(TAG, "read data: %s", dtmp);
-                //         ESP_LOGI(TAG, "read pat : %s", pat);
-                //     }
-                //     break;
-                //Others
-                default:
-                    ESP_LOGI(TAG, "uart event type: %d", event.type);
-                    break;
-            }
-        }
+        /* Transfer received bytes from uart to FIFO Rx */
+        uartReceiveBytes(PROTOCOL_UART_NUM, uart_queue_rx, &sFIFORx, TAG);
+        /* Transfer received bytes from FIFO Rx to uart*/
+        uartSendBytes(PROTOCOL_UART_NUM, &sFIFOTx, TAG);
+
+        /* Process incoming data */
+        processIncomingCommunication(&sFIFORx, &sFIFOTx, TAG);
+
     }
-    free(dtmp);
-    dtmp = NULL;
+    free(pu8FIFORxBuffer);
+    pu8FIFORxBuffer = NULL;
+    free(pu8FIFOTxBuffer);
+    pu8FIFOTxBuffer = NULL;
     vTaskDelete(NULL);
 }
 
@@ -116,18 +172,13 @@ void protocolTaskInit(void)
     };
 
     //Install UART driver, and get the queue.
-    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart_queue, 0);
-    uart_param_config(EX_UART_NUM, &uart_config);
+    uart_driver_install(PROTOCOL_UART_NUM, UART_BUF_SIZE * 2, UART_BUF_SIZE * 2, 20, &uart_queue_rx, 0);
+    uart_param_config(PROTOCOL_UART_NUM, &uart_config);
 
     //Set UART log level
     esp_log_level_set(TAG, ESP_LOG_INFO);
     //Set UART pins (using UART0 default pins ie no changes.)
-    uart_set_pin(EX_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    //Set uart pattern detect function.
-    //uart_enable_pattern_det_baud_intr(EX_UART_NUM, '+', PATTERN_CHR_NUM, 9, 0, 0);
-    //Reset the pattern queue length to record at most 20 pattern positions.
-    //uart_pattern_queue_reset(EX_UART_NUM, 20);
+    uart_set_pin(PROTOCOL_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     //Create Protocol task
     xTaskCreate(protocol_task, "protocol_task", 1024, NULL, 12, NULL);
