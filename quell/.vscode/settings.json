@@ -1,6 +1,10 @@
 {
   "C_Cpp.intelliSenseEngine": "Tag Parser",
   "files.associations": {
-    "*.inc": "c"
-  }
+    "*.inc": "c",
+    "random": "c",
+    "task.h": "c",
+    "protocoltask.h": "c"
+  },
+  "idf.adapterTargetName": "esp32"
 }
