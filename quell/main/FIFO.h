@@ -4,6 +4,7 @@
     #include <stdlib.h>
     #include <assert.h>
     #include <stdbool.h>
+    #include <stdarg.h>
     typedef struct
     {
         size_t head;
@@ -19,5 +20,6 @@
     bool FIFO_count(fifo_t *fifo, size_t *count);
     bool FIFO_free(fifo_t *fifo, size_t *free);
     bool FIFO_clean(fifo_t *fifo);
+    bool FIFO_printf(fifo_t *_psFIFO, const char *_fmt, ...);
 
 #endif /* _FIFO_H_ */

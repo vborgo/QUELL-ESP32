@@ -1,2 +1,2 @@
-idf_component_register(SRCS "quell.c" "protocol.c" "FIFO.c" "main.c" "ProtocolTask/protocolTask.c" "TerminalTask/terminalTask.c" "crc.c"
-                    INCLUDE_DIRS "." "ProtocolTask" "TerminalTask")
+idf_component_register(SRCS "main.c" "FIFO.c" "FIFOUart.c"  "ProtocolTask/protocolTask.c" "ProtocolTask/protocol.c" "TerminalTask/terminalTask.c" "TerminalTask/terminal.c" "crc.c" "quell.c"
+                        INCLUDE_DIRS "." "ProtocolTask" "TerminalTask")

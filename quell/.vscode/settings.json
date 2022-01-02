@@ -8,7 +8,17 @@
     "array": "c",
     "string_view": "c",
     "initializer_list": "c",
-    "utility": "c"
+    "utility": "c",
+    "fifouart.h": "c",
+    "fifo.h": "c",
+    "queue.h": "c",
+    "string": "c",
+    "terminal.h": "c",
+    "stdio.h": "c"
   },
-  "idf.adapterTargetName": "esp32"
+  "idf.adapterTargetName": "esp32",
+  "idf.openOcdConfigs": [
+    "interface/ftdi/esp32_devkitj_v1.cfg",
+    "target/esp32.cfg"
+  ]
 }
