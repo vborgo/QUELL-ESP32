@@ -7,7 +7,6 @@
 #define SOH 1
 #define SOT 2
 #define EOT 3
-#define MINIMUM_PACKET_SIZE 7
 
 #define MESSAGE_MARCO "marco"
 #define MESSAGE_POLO "polo"
@@ -17,13 +16,15 @@
 
 int32_t calculatePacketCRC16(uint16_t *_pu16CRC16, uint8_t *_pu8Packet, uint16_t _u16PacketSize)
 {
-    if(_pu16CRC16 == NULL || _pu8Packet == NULL || _u16PacketSize)
+    if(_pu16CRC16 == NULL || _pu8Packet == NULL || _u16PacketSize == 0)
     {
         return QUELL_ERROR;
     }
 
     /* Calculate the CRC16, eliminating the CRC16 bytes (of course) */
     *_pu16CRC16 = calculateCRC16CCITT((char*)_pu8Packet, _u16PacketSize - 2);
+
+    //ESP_LOGI("terminal", "CRC %x %x", *_pu16CRC16, _u16PacketSize);
 
     return QUELL_OK;
 }
@@ -43,7 +44,7 @@ int32_t verifyPacket(uint8_t *_pu8Packet, uint16_t _u16PacketSize)
 {
     uint16_t u16CalculatedCRC16 = 0;
 
-    if(_pu8Packet == NULL || _u16PacketSize)
+    if(_pu8Packet == NULL || _u16PacketSize == 0)
     {
         return QUELL_ERROR;
     }
@@ -55,19 +56,20 @@ int32_t verifyPacket(uint8_t *_pu8Packet, uint16_t _u16PacketSize)
     }
 
     /* Check the const bytes (SOH, SOT and )  */
-    if(_pu8Packet[0] != SOH || _pu8Packet[3] != SOH || _pu8Packet[_u16PacketSize - 3] != EOT)
+    if(_pu8Packet[0] != SOH || _pu8Packet[3] != SOT || _pu8Packet[(_u16PacketSize - 1) - 2] != EOT)
     {
         return QUELL_ERROR;
     }
 
     /*Check if the message size is correct*/
-    if(*((uint16_t*)(&_pu8Packet[1])) != _u16PacketSize - MINIMUM_PACKET_SIZE) //Maybe have created a union to get the u16 from the packet array without crazy casts would have been a good idea
+    if((((uint16_t)_pu8Packet[1] << 8) | (uint16_t)_pu8Packet[2]) != _u16PacketSize)
     {
         return QUELL_ERROR;
     }
 
     /* Checks CRC16 */
-    if(calculatePacketCRC16(&u16CalculatedCRC16, _pu8Packet, _u16PacketSize) == QUELL_ERROR || u16CalculatedCRC16 != *((uint16_t*)(&_pu8Packet[_u16PacketSize - 2])))
+    if(calculatePacketCRC16(&u16CalculatedCRC16, _pu8Packet, _u16PacketSize) == QUELL_ERROR || 
+       u16CalculatedCRC16 != (((uint16_t)_pu8Packet[_u16PacketSize - 2] << 8) | (uint16_t)_pu8Packet[_u16PacketSize - 1]))
     {
         return QUELL_ERROR;
     }
@@ -89,13 +91,13 @@ int32_t extractMessageFromPacket(uint8_t *_pu8Packet, uint16_t _u16PacketSize, u
         return QUELL_ERROR;
     }
 
-    /* Points to start of the message */
-    _pu8Message = &_pu8Packet[4];
-
     /* Gets the message size */
-    *_pu16MessageSize = *((uint16_t*)(&_pu8Packet[1]));
-    
+    *_pu16MessageSize = MESSAGE_SIZE((((uint16_t)_pu8Packet[1] << 8) | (uint16_t)_pu8Packet[2]));
 
+    /* Copies the message */
+    memcpy(_pu8Message, &_pu8Packet[4], *_pu16MessageSize);
+    _pu8Message[*_pu16MessageSize] = 0;
+    
     return QUELL_OK;
 }
 
@@ -127,14 +129,13 @@ int32_t trimFIFOForPacket(fifo_t *_psFIFORx)
 
     return QUELL_OK;
 }
-
 int32_t getPacketFromFIFO(fifo_t *_psFIFORx, uint8_t *_pu8Buffer, uint16_t _u16BufferSize, uint16_t *_pu16PacketSize)
 {
     char cData;
     size_t tCount = 0;
     uint16_t u16PacketSize = 0;
 
-    if(_psFIFORx == NULL || *_pu8Buffer == NULL || _u16BufferSize == 0 || _pu16PacketSize == NULL)
+    if(_psFIFORx == NULL || _pu8Buffer == NULL || _u16BufferSize == 0 || _pu16PacketSize == NULL)
     {
         return QUELL_ERROR;
     }
@@ -142,6 +143,7 @@ int32_t getPacketFromFIFO(fifo_t *_psFIFORx, uint8_t *_pu8Buffer, uint16_t _u16B
     /* Zero the size */
     *_pu16PacketSize = 0;
     
+
     /* Trim the FIFO for eventual garbage */
     if(trimFIFOForPacket(_psFIFORx) == QUELL_ERROR)
     {
@@ -171,7 +173,7 @@ int32_t getPacketFromFIFO(fifo_t *_psFIFORx, uint8_t *_pu8Buffer, uint16_t _u16B
     }
 
     /* Just a last check of one of the known bytes from the packet */
-    if(FIFO_peak(_psFIFORx, u16PacketSize - 2, &cData) == true && cData != EOT)
+    if(FIFO_peak(_psFIFORx, (u16PacketSize - 1) - 2, &cData) == false || cData != EOT)
     {
         return QUELL_ERROR;
     }
@@ -211,6 +213,8 @@ int32_t makePacket(uint8_t * _pu8PacketBuffer, uint16_t _u16PacketBufferSize, ui
         return QUELL_ERROR;
     }
 
+    //ESP_LOGI("terminal", "-1<%u> <%u>", _u16PacketBufferSize, MINIMUM_PACKET_SIZE + _u16MessageSize);
+
     /* Start of heading*/
     _pu8PacketBuffer[0] = SOH;
     /* Packet Size */
@@ -228,8 +232,12 @@ int32_t makePacket(uint8_t * _pu8PacketBuffer, uint16_t _u16PacketBufferSize, ui
     {
         return QUELL_ERROR;
     }
+
+    //ESP_LOGI("terminal", "-2<%u> <%u> <%x>", _u16PacketBufferSize, MINIMUM_PACKET_SIZE + _u16MessageSize, CRC16);
+
+
     _pu8PacketBuffer[4 + _u16MessageSize + 1] = (CRC16 >> 8) & 0xFF;
-    _pu8PacketBuffer[4 + _u16MessageSize + 1] = CRC16 & 0xFF;
+    _pu8PacketBuffer[4 + _u16MessageSize + 2] = CRC16 & 0xFF;
 
     return QUELL_OK;
 }
@@ -268,7 +276,7 @@ int32_t sendMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u16Messa
 
 
 
-int32_t acknowledgeMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u16MessageSize, char* _pcTAG)
+int32_t acknowledgeMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u16MessageSize, const char* _pcTAG)
 {
     struct
     {
@@ -291,7 +299,7 @@ int32_t acknowledgeMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u
         if(sMessageAnswer[u16Index].pu8ReceivedMessage != NULL)
         {
             /* Find which message */
-            if(memcmp(_pu8Message, sMessageAnswer[u16Index].pu8ReceivedMessage, strlen((char*)sMessageAnswer[u16Index].pu8ReceivedMessage)) == 0)
+            if(strcmp((char*)_pu8Message, (char*)sMessageAnswer[u16Index].pu8ReceivedMessage) == 0)
             {
                 if(_pcTAG != NULL)
                 {
@@ -309,6 +317,11 @@ int32_t acknowledgeMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u
                     /* Acknowledge the message */
                     return (sendMessage(_psFIFOTx, (uint8_t*)sMessageAnswer[u16Index].pu8AknowledgementMessage, strlen((char*)sMessageAnswer[u16Index].pu8AknowledgementMessage)));
                 }
+                else
+                {
+                    /* The message doesnt have/need aknowledgement */
+                    return QUELL_OK;
+                }
             }
         }
         /* The message received is unkwonw */
@@ -322,7 +335,7 @@ int32_t acknowledgeMessage(fifo_t *_psFIFOTx, uint8_t * _pu8Message, uint16_t _u
     return QUELL_ERROR;
 }
 
-int32_t processIncomingCommunication(fifo_t *_psFIFORx, fifo_t *_psFIFOTx, char* _pcTAG)
+int32_t processIncomingCommunication(fifo_t *_psFIFORx, fifo_t *_psFIFOTx, const char* _pcTAG)
 {
     uint8_t au8PacketBuffer[64];
     uint8_t au8MessageBuffer[64];
@@ -334,6 +347,7 @@ int32_t processIncomingCommunication(fifo_t *_psFIFORx, fifo_t *_psFIFOTx, char*
         return QUELL_ERROR;
     }
     
+
     /* Get packet from fifo Rx */
     if(getPacketFromFIFO(_psFIFORx, au8PacketBuffer, sizeof(au8PacketBuffer), &u16PacketSize) == QUELL_OK)
     {

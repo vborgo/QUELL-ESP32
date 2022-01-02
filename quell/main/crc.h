@@ -3,4 +3,4 @@
 
 uint16_t calculateCRC16CCITT(char *ptr, int16_t count);
 
-#endif
+#endif /* _CRC_H_ */
