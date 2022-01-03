@@ -5,6 +5,9 @@ Create a protocol for sending messages via UART using an ESP32. This could be in
 
 Would this protocol be suitable for creating the IMU history as described here? What issues might you expect to encounter when creating this history? What checks could we include to ensure the data is valid?
 
+2021-12-03:
+Without a reliable data delivery control, I would not trust any protocol. It would be ok to use something like this in a PCB with both chips connected close to each other on a RS-232 communication, the reliability of 115200 baud is still good if you dont need more than 12kb/s. But if you need more speed, and speacially with wire connection, I would recommend something like I2C or CAN, at least RS-422. But lets say we only have available pins for RX and TX (not even CTS and RTS flow control), the packets must have, at least, a header with Packet Size and Checksum or CRC check, or both, there is other algorithms, but this are the most widely used. A packet counter is an option, but it is more recommended for UDP that tends to deliver in packets, the Packet Size in the header already does the job.
+
 -----------------------------------------------------------------------------------------
 
 # Protocol:
